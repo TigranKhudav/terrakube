@@ -7,6 +7,7 @@ import io.terrakube.api.rs.webhook.WebhookEvent;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 import io.terrakube.api.plugin.scheduler.ScheduleJobService;
+import io.terrakube.api.plugin.vcs.provider.azdevops.AzDevOpsWebhookService;
 import io.terrakube.api.plugin.vcs.provider.bitbucket.BitBucketWebhookService;
 import io.terrakube.api.plugin.vcs.provider.github.GitHubWebhookService;
 import io.terrakube.api.plugin.vcs.provider.gitlab.GitLabWebhookService;
@@ -38,6 +39,7 @@ public class WebhookService {
     GitHubWebhookService gitHubWebhookService;
     GitLabWebhookService gitLabWebhookService;
     BitBucketWebhookService bitBucketWebhookService;
+    AzDevOpsWebhookService azDevOpsWebhookService;
     JobRepository jobRepository;
     ScheduleJobService scheduleJobService;
     ObjectMapper objectMapper;
@@ -74,6 +76,11 @@ public class WebhookService {
             case BITBUCKET:
                 webhookResult = bitBucketWebhookService.processWebhook(jsonPayload, headers,
                         base64WorkspaceId);
+                break;
+            case AZURE_DEVOPS:
+            case AZURE_SP_MI:
+                webhookResult = azDevOpsWebhookService.processWebhook(jsonPayload, headers,
+                        base64WorkspaceId, workspace);
                 break;
             default:
                 break;
@@ -207,6 +214,10 @@ public class WebhookService {
             case BITBUCKET:
                 webhookRemoteId = bitBucketWebhookService.createOrUpdateWebhook(workspace, persistedWebhook);
                 break;
+            case AZURE_DEVOPS:
+            case AZURE_SP_MI:
+                webhookRemoteId = azDevOpsWebhookService.createOrUpdateWebhook(workspace, persistedWebhook);
+                break;
             default:
                 break;
         }
@@ -242,6 +253,10 @@ public class WebhookService {
                 break;
             case BITBUCKET:
                 bitBucketWebhookService.deleteWebhook(workspace, webhook.getRemoteHookId());
+                break;
+            case AZURE_DEVOPS:
+            case AZURE_SP_MI:
+                azDevOpsWebhookService.deleteWebhook(workspace, webhook.getRemoteHookId());
                 break;
             default:
                 break;
@@ -294,6 +309,10 @@ public class WebhookService {
                 break;
             case GITLAB:
                 gitLabWebhookService.sendCommitStatus(job, JobStatus.pending);
+                break;
+            case AZURE_DEVOPS:
+            case AZURE_SP_MI:
+                azDevOpsWebhookService.sendCommitStatus(job, JobStatus.pending);
                 break;
             default:
                 break;
