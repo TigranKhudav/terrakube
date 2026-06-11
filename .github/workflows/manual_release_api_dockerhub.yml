@@ -1,0 +1,163 @@
+name: Manual API Release to Docker Hub
+
+# Fast path for custom builds: rebuilds and publishes ONLY the terrakube-api-server
+# image to Docker Hub under your own namespace. Requires two repository secrets:
+#   DOCKERHUB_USERNAME  - your Docker Hub username (also the default namespace)
+#   DOCKERHUB_TOKEN     - a Docker Hub access token (Account Settings -> Security)
+# For a full release of all components use release.yml (Docker Hub) or
+# manual_release.yml (GHCR).
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Optional version override (for example: 1.2.3 or v1.2.3)"
+        required: false
+        type: string
+      bump:
+        description: "Semver bump used when version is not provided"
+        required: true
+        default: patch
+        type: choice
+        options:
+          - patch
+          - minor
+          - major
+      namespace:
+        description: "Docker Hub namespace (defaults to the DOCKERHUB_USERNAME secret)"
+        required: false
+        type: string
+      run_tests:
+        description: "Run the api test suite before building the image"
+        required: true
+        default: false
+        type: boolean
+
+jobs:
+  prepare-release:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      version: ${{ steps.resolve-version.outputs.version }}
+    steps:
+      - name: Resolve release version
+        id: resolve-version
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          INPUT_VERSION: ${{ inputs.version }}
+          INPUT_BUMP: ${{ inputs.bump }}
+        run: |
+          set -euo pipefail
+
+          normalize_version() {
+            echo "$1" | sed 's/^v//'
+          }
+
+          validate_version() {
+            [[ "$1" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]
+          }
+
+          if [ -n "${INPUT_VERSION}" ]; then
+            CANDIDATE_VERSION="$(normalize_version "${INPUT_VERSION}")"
+            if ! validate_version "${CANDIDATE_VERSION}"; then
+              echo "Invalid version '${INPUT_VERSION}'. Expected semver format like 1.2.3 or v1.2.3"
+              exit 1
+            fi
+            NEXT_VERSION="${CANDIDATE_VERSION}"
+          else
+            LATEST_TAG="$(gh api "repos/${GITHUB_REPOSITORY}/releases/latest" --jq '.tag_name' 2>/dev/null || true)"
+            if [ -z "${LATEST_TAG}" ] || [ "${LATEST_TAG}" = "null" ]; then
+              LATEST_VERSION="0.0.0"
+            else
+              LATEST_VERSION="$(normalize_version "${LATEST_TAG}")"
+            fi
+
+            if ! validate_version "${LATEST_VERSION}"; then
+              echo "Latest release tag '${LATEST_TAG}' is not semver-compatible. Use the version input explicitly."
+              exit 1
+            fi
+
+            IFS='.' read -r MAJOR MINOR PATCH <<< "${LATEST_VERSION}"
+            case "${INPUT_BUMP}" in
+              major)
+                NEXT_VERSION="$((MAJOR + 1)).0.0"
+                ;;
+              minor)
+                NEXT_VERSION="${MAJOR}.$((MINOR + 1)).0"
+                ;;
+              patch)
+                NEXT_VERSION="${MAJOR}.${MINOR}.$((PATCH + 1))"
+                ;;
+              *)
+                echo "Unsupported bump type: ${INPUT_BUMP}"
+                exit 1
+                ;;
+            esac
+          fi
+
+          echo "Selected version: ${NEXT_VERSION}"
+          echo "version=${NEXT_VERSION}" >> "${GITHUB_OUTPUT}"
+
+  build-and-push-api:
+    needs: prepare-release
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    env:
+      VERSION: ${{ needs.prepare-release.outputs.version }}
+      IMAGE_NAME: terrakube-api-server
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Resolve Docker Hub namespace
+        run: |
+          set -euo pipefail
+          NS="${{ inputs.namespace }}"
+          if [ -z "${NS}" ]; then
+            NS="${{ secrets.DOCKERHUB_USERNAME }}"
+          fi
+          if [ -z "${NS}" ]; then
+            echo "No Docker Hub namespace: set the DOCKERHUB_USERNAME secret or provide the namespace input."
+            exit 1
+          fi
+          echo "NAMESPACE=${NS}" >> "${GITHUB_ENV}"
+
+      - name: Login to Docker Hub
+        uses: docker/login-action@650006c6eb7dba73a995cc03b0b2d7f5ca915bee # v4.2.0
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Cache Maven packages
+        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5.0.5
+        with:
+          path: ~/.m2
+          key: ${{ runner.os }}-m2-${{ hashFiles('pom.xml') }}
+          restore-keys: |
+            ${{ runner.os }}-m2
+
+      - name: Set up JDK 25
+        uses: actions/setup-java@be666c2fcd27ec809703dec50e508c2fdc7f6654 # v5.2.0
+        with:
+          java-version: '25'
+          distribution: 'liberica'
+
+      - name: Update POM version
+        run: mvn versions:set-property -Dproperty=revision -DnewVersion=${VERSION} -DgenerateBackupPoms=false
+
+      - name: Run api tests
+        if: ${{ inputs.run_tests }}
+        run: mvn -pl api -am test -B --file pom.xml -Dspring-boot.build-image.skip=true
+
+      - name: Build api image with Maven
+        run: mvn -pl api spring-boot:build-image -B --file pom.xml -Dmaven.test.skip=true
+
+      - name: Tag and push api image
+        run: |
+          IMAGE_ID="$(docker images api-server:${VERSION} -q)"
+          docker tag "${IMAGE_ID}" ${NAMESPACE}/${IMAGE_NAME}:${VERSION}
+          docker tag "${IMAGE_ID}" ${NAMESPACE}/${IMAGE_NAME}:latest
+          docker push ${NAMESPACE}/${IMAGE_NAME}:${VERSION}
+          docker push ${NAMESPACE}/${IMAGE_NAME}:latest
+          echo "Published docker.io/${NAMESPACE}/${IMAGE_NAME}:${VERSION}"
