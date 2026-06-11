@@ -605,11 +605,15 @@ public class AzDevOpsWebhookService extends WebhookServiceBase {
             URI uri = new URI(cleaned);
             String host = uri.getHost();
             String scheme = uri.getScheme();
-            // authority keeps the port (if any), which matters for self hosted servers and tests
-            String authority = uri.getAuthority();
-            if (host == null || scheme == null || authority == null) {
+            if (host == null || scheme == null) {
                 return null;
             }
+            // Build host[:port] WITHOUT the userinfo component. Azure DevOps clone urls
+            // frequently include a userinfo (e.g. https://org@dev.azure.com/...), but the
+            // HTTP client rejects a request URI whose authority carries the deprecated
+            // userinfo component, so it must be stripped here (getAuthority keeps it).
+            int port = uri.getPort();
+            String hostPort = host + (port != -1 ? ":" + port : "");
 
             List<String> segments = new ArrayList<>();
             for (String segment : uri.getPath().split("/")) {
@@ -623,7 +627,7 @@ public class AzDevOpsWebhookService extends WebhookServiceBase {
             String repository;
             if (host.endsWith("visualstudio.com")) {
                 // org is the subdomain, path is {project}/{repo}
-                orgBaseUrl = scheme + "://" + authority;
+                orgBaseUrl = scheme + "://" + hostPort;
                 if (segments.size() < 2) {
                     return null;
                 }
@@ -634,7 +638,7 @@ public class AzDevOpsWebhookService extends WebhookServiceBase {
                 if (segments.size() < 3) {
                     return null;
                 }
-                orgBaseUrl = scheme + "://" + authority + "/" + segments.get(0);
+                orgBaseUrl = scheme + "://" + hostPort + "/" + segments.get(0);
                 project = segments.get(1);
                 repository = segments.get(segments.size() - 1);
             }
