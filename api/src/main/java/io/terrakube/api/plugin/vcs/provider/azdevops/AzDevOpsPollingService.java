@@ -106,7 +106,7 @@ public class AzDevOpsPollingService {
         log.info("Azure DevOps polling detected new commit on {}/{}: {} -> {}",
                 workspace.getName(), branch, previousCommit, latestCommit);
         WebhookResult result = azDevOpsWebhookService.buildPushResult(workspace, branch, previousCommit, latestCommit);
-        boolean triggered = webhookService.triggerPolledPush(webhook, result);
+        boolean triggered = webhookService.triggerPolledPush(webhook.getId(), result);
 
         // Advance the baseline even if no event matched, so the same commit is not evaluated again.
         redisTemplate.opsForValue().set(key, latestCommit);

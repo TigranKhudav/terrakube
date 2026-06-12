@@ -175,7 +175,12 @@ public class WebhookService {
      * job scheduling as an inbound webhook. Returns true when a job was created.
      */
     @Transactional
-    public boolean triggerPolledPush(Webhook webhook, WebhookResult webhookResult) {
+    public boolean triggerPolledPush(UUID webhookId, WebhookResult webhookResult) {
+        Webhook webhook = webhookRepository.findById(webhookId).orElse(null);
+        if (webhook == null) {
+            log.warn("Polled webhook {} no longer exists", webhookId);
+            return false;
+        }
         Workspace workspace = webhook.getWorkspace();
         try {
             WebhookEvent matchedEvent = findMatchingEvent(webhookResult, webhook);
