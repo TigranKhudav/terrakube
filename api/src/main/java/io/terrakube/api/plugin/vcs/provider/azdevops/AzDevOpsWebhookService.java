@@ -141,23 +141,80 @@ public class AzDevOpsWebhookService extends WebhookServiceBase {
         result.setCreatedBy(resolveUser(resource.path("pushedBy")));
 
         // Azure DevOps push payloads do not contain the changed files, so we collect them
-        // from the API for every commit included in the push.
+        // from the API. The event's commits[] array is unreliable (often empty), so we
+        // prefer diffing the pushed range oldObjectId..newObjectId.
         JsonNode repository = resource.path("repository");
         String repositoryId = repository.path("id").asText();
         AzureRepo repo = parseSource(workspace.getSource());
 
         if (!result.isRelease() && repo != null && !repositoryId.isEmpty()) {
-            Set<String> changedFiles = new LinkedHashSet<>();
-            for (JsonNode commit : resource.path("commits")) {
-                String commitId = commit.path("commitId").asText();
-                if (!commitId.isEmpty()) {
-                    changedFiles.addAll(getCommitChanges(workspace.getVcs(), repo, repositoryId, commitId));
-                }
-            }
-            result.setFileChanges(new ArrayList<>(changedFiles));
+            result.setFileChanges(getPushFileChanges(workspace.getVcs(), repo, repositoryId, resource, refUpdate));
+            log.info("Azure DevOps push detected {} changed file(s) on branch {}: {}",
+                    result.getFileChanges().size(), result.getBranch(), result.getFileChanges());
         }
 
         return result;
+    }
+
+    /**
+     * Resolves the files changed by a push. Azure does not send them in the webhook payload, and the
+     * event's {@code commits[]} array is frequently empty, so we prefer the diff of the pushed range
+     * (oldObjectId..newObjectId) and fall back to per-commit / tip-commit changes.
+     */
+    private List<String> getPushFileChanges(Vcs vcs, AzureRepo repo, String repositoryId, JsonNode resource,
+            JsonNode refUpdate) {
+        String oldObjectId = refUpdate.path("oldObjectId").asText();
+        String newObjectId = refUpdate.path("newObjectId").asText();
+        boolean newBranch = oldObjectId == null || oldObjectId.isEmpty() || oldObjectId.chars().allMatch(c -> c == '0');
+
+        Set<String> files = new LinkedHashSet<>();
+
+        // Primary: diff the whole pushed range (covers every commit in the push)
+        if (!newBranch && !newObjectId.isEmpty()) {
+            files.addAll(getDiffChanges(vcs, repo, repositoryId, oldObjectId, newObjectId));
+        }
+
+        // Fallback 1: per-commit changes from the event payload
+        if (files.isEmpty()) {
+            for (JsonNode commit : resource.path("commits")) {
+                String commitId = commit.path("commitId").asText();
+                if (!commitId.isEmpty()) {
+                    files.addAll(getCommitChanges(vcs, repo, repositoryId, commitId));
+                }
+            }
+        }
+
+        // Fallback 2: changes of the tip commit
+        if (files.isEmpty() && !newObjectId.isEmpty()) {
+            files.addAll(getCommitChanges(vcs, repo, repositoryId, newObjectId));
+        }
+
+        return new ArrayList<>(files);
+    }
+
+    private List<String> getDiffChanges(Vcs vcs, AzureRepo repo, String repositoryId, String baseCommit,
+            String targetCommit) {
+        List<String> changedFiles = new ArrayList<>();
+        String apiUrl = String.format(
+                "%s/%s/_apis/git/repositories/%s/diffs/commits?baseVersionType=commit&baseVersion=%s"
+                        + "&targetVersionType=commit&targetVersion=%s&api-version=%s",
+                repo.orgBaseUrl, UriUtils.encodePathSegment(repo.project, StandardCharsets.UTF_8),
+                repositoryId, baseCommit, targetCommit, API_VERSION);
+
+        ResponseEntity<String> response = callAzureApi(vcs, "", apiUrl, HttpMethod.GET);
+        if (response == null || !response.getStatusCode().is2xxSuccessful()) {
+            log.error("Failed to fetch Azure DevOps diff {}..{}", baseCommit, targetCommit);
+            return changedFiles;
+        }
+        try {
+            JsonNode rootNode = objectMapper.readTree(response.getBody());
+            for (JsonNode change : rootNode.path("changes")) {
+                addChangedFile(changedFiles, change);
+            }
+        } catch (Exception e) {
+            log.error("Error parsing Azure DevOps commit diff", e);
+        }
+        return changedFiles;
     }
 
     private WebhookResult handlePullRequestEvent(JsonNode rootNode, WebhookResult result, Workspace workspace) {
