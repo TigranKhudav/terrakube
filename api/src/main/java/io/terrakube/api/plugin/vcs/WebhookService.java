@@ -183,7 +183,7 @@ public class WebhookService {
         }
         Workspace workspace = webhook.getWorkspace();
         try {
-            WebhookEvent matchedEvent = findMatchingEvent(webhookResult, webhook);
+            WebhookEvent matchedEvent = findMatchingPushEventForPoll(webhookResult, webhook);
             log.info("Polled push for workspace {}, using template with id {}", workspace.getName(),
                     matchedEvent.getTemplateId());
             Job savedJob = createAndScheduleJob(matchedEvent.getTemplateId(), webhookResult, workspace);
@@ -197,6 +197,24 @@ public class WebhookService {
             log.error("Error creating job for polled push on workspace {}", workspace.getName(), e);
             return false;
         }
+    }
+
+    /**
+     * Event matching for polled pushes: the branch must match, and the path filter is applied only
+     * when the changed files are known. When the file list is empty/unknown (the diff couldn't be
+     * resolved) a detected commit still triggers, so polling reliably runs on any new commit rather
+     * than silently dropping it.
+     */
+    private WebhookEvent findMatchingPushEventForPoll(WebhookResult result, Webhook webhook) {
+        return webhookEventRepository
+                .findByWebhookAndEventOrderByPriorityAsc(webhook, WebhookEventType.PUSH)
+                .stream()
+                .filter(webhookEvent -> checkBranch(result.getBranch(), webhookEvent)
+                        && (result.getFileChanges() == null || result.getFileChanges().isEmpty()
+                                || checkFileChanges(result.getFileChanges(), webhookEvent)))
+                .findFirst()
+                .orElseThrow(() -> new IllegalArgumentException(
+                        "No PUSH webhook event matches branch " + result.getBranch()));
     }
 
     private WebhookEvent findMatchingEvent(WebhookResult result, Webhook webhook) {

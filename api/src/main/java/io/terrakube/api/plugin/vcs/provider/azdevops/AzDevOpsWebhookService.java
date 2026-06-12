@@ -475,6 +475,10 @@ public class AzDevOpsWebhookService extends WebhookServiceBase {
                 List<String> files = (baseCommit != null && !baseCommit.isEmpty())
                         ? getDiffChanges(workspace.getVcs(), repo, repositoryAndProject[0], baseCommit, newCommit)
                         : getCommitChanges(workspace.getVcs(), repo, repositoryAndProject[0], newCommit);
+                // Fallback to the tip commit's own changes when the range diff yields nothing
+                if (files.isEmpty() && newCommit != null && !newCommit.isEmpty()) {
+                    files = getCommitChanges(workspace.getVcs(), repo, repositoryAndProject[0], newCommit);
+                }
                 result.setFileChanges(files);
             }
         }
