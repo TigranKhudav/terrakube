@@ -450,12 +450,19 @@ public class AzDevOpsWebhookService extends WebhookServiceBase {
 
         Map<String, Object> consumerInputs = new LinkedHashMap<>();
         consumerInputs.put("url", webhookUrl);
+        // Accept self-signed / internal certificates so deliveries are not dropped on TLS
+        // validation (otherwise Azure puts the subscription on probation and loses events).
+        consumerInputs.put("acceptUntrustedCerts", "true");
         consumerInputs.put("httpHeaders", "X-Terrakube-Token:" + secret);
+
+        // Current Azure DevOps resource version is 2.0 for git.push and the pull request events;
+        // the pull request comment event uses 1.0.
+        String resourceVersion = EVENT_PR_COMMENT.equals(azureEventType) ? "1.0" : "2.0";
 
         Map<String, Object> body = new LinkedHashMap<>();
         body.put("publisherId", "tfs");
         body.put("eventType", azureEventType);
-        body.put("resourceVersion", EVENT_PR_COMMENT.equals(azureEventType) ? "2.0" : "1.0");
+        body.put("resourceVersion", resourceVersion);
         body.put("consumerId", "webHooks");
         body.put("consumerActionId", "httpRequest");
         body.put("publisherInputs", publisherInputs);
