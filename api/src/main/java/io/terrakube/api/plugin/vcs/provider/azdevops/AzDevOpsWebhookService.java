@@ -413,6 +413,74 @@ public class AzDevOpsWebhookService extends WebhookServiceBase {
         }
     }
 
+    /**
+     * Returns the current tip commit id of {@code branch}, or null if it cannot be resolved.
+     * Used by outbound polling so new commits can be detected without an inbound webhook endpoint
+     * (e.g. when Terrakube runs on a private network unreachable by Azure DevOps service hooks).
+     */
+    public String getLatestCommit(Workspace workspace, String branch) {
+        AzureRepo repo = parseSource(workspace.getSource());
+        if (repo == null) {
+            log.error("Unable to parse Azure DevOps repository from source {}", workspace.getSource());
+            return null;
+        }
+        String[] repositoryAndProject = resolveRepository(workspace.getVcs(), repo);
+        if (repositoryAndProject == null) {
+            return null;
+        }
+
+        String filter = "heads/" + UriUtils.encodeQueryParam(branch, StandardCharsets.UTF_8);
+        String apiUrl = String.format("%s/%s/_apis/git/repositories/%s/refs?filter=%s&api-version=%s",
+                repo.orgBaseUrl, UriUtils.encodePathSegment(repo.project, StandardCharsets.UTF_8),
+                repositoryAndProject[0], filter, API_VERSION);
+
+        ResponseEntity<String> response = callAzureApi(workspace.getVcs(), "", apiUrl, HttpMethod.GET);
+        if (response == null || !response.getStatusCode().is2xxSuccessful()) {
+            log.error("Failed to fetch Azure DevOps branch tip for {}/{}", repo.repository, branch);
+            return null;
+        }
+        try {
+            JsonNode rootNode = objectMapper.readTree(response.getBody());
+            String expectedName = "refs/heads/" + branch;
+            for (JsonNode ref : rootNode.path("value")) {
+                if (expectedName.equals(ref.path("name").asText())) {
+                    return ref.path("objectId").asText();
+                }
+            }
+        } catch (Exception e) {
+            log.error("Error parsing Azure DevOps refs response", e);
+        }
+        return null;
+    }
+
+    /**
+     * Builds a push {@link WebhookResult} for a commit detected by polling, resolving the files
+     * changed between {@code baseCommit} (the previously seen commit, may be null) and {@code newCommit}.
+     */
+    public WebhookResult buildPushResult(Workspace workspace, String branch, String baseCommit, String newCommit) {
+        WebhookResult result = new WebhookResult();
+        result.setVia(JobVia.AzureDevops.name());
+        result.setEvent("push");
+        result.setValid(true);
+        result.setBranch(branch);
+        result.setCommit(newCommit);
+        result.setCreatedBy("azuredevops-poll");
+        result.setWorkspaceId(workspace.getId().toString());
+        result.setFileChanges(new ArrayList<>());
+
+        AzureRepo repo = parseSource(workspace.getSource());
+        if (repo != null) {
+            String[] repositoryAndProject = resolveRepository(workspace.getVcs(), repo);
+            if (repositoryAndProject != null) {
+                List<String> files = (baseCommit != null && !baseCommit.isEmpty())
+                        ? getDiffChanges(workspace.getVcs(), repo, repositoryAndProject[0], baseCommit, newCommit)
+                        : getCommitChanges(workspace.getVcs(), repo, repositoryAndProject[0], newCommit);
+                result.setFileChanges(files);
+            }
+        }
+        return result;
+    }
+
     private Set<String> resolveAzureEventTypes(Webhook webhook) {
         Set<String> azureEventTypes = new LinkedHashSet<>();
         for (WebhookEvent event : webhook.getEvents()) {

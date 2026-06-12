@@ -170,6 +170,30 @@ public class WebhookService {
         return savedJob;
     }
 
+    /**
+     * Triggers a plan for a push detected by outbound polling, reusing the same event matching and
+     * job scheduling as an inbound webhook. Returns true when a job was created.
+     */
+    @Transactional
+    public boolean triggerPolledPush(Webhook webhook, WebhookResult webhookResult) {
+        Workspace workspace = webhook.getWorkspace();
+        try {
+            WebhookEvent matchedEvent = findMatchingEvent(webhookResult, webhook);
+            log.info("Polled push for workspace {}, using template with id {}", workspace.getName(),
+                    matchedEvent.getTemplateId());
+            Job savedJob = createAndScheduleJob(matchedEvent.getTemplateId(), webhookResult, workspace);
+            sendCommitStatus(savedJob);
+            return true;
+        } catch (IllegalArgumentException e) {
+            log.info("No matching push event for polled commit on workspace {}: {}", workspace.getName(),
+                    e.getMessage());
+            return false;
+        } catch (Exception e) {
+            log.error("Error creating job for polled push on workspace {}", workspace.getName(), e);
+            return false;
+        }
+    }
+
     private WebhookEvent findMatchingEvent(WebhookResult result, Webhook webhook) {
         WebhookEventType eventType = result.isPrComment()
                 ? WebhookEventType.PULL_REQUEST
